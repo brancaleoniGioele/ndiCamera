@@ -30,15 +30,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  permission_handler: ^12.0.1      # ← spostato qui
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  permission_handler: ^12.0.1
+  flutter_lints: ^6.0.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

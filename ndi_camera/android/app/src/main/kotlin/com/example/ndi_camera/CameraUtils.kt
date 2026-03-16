@@ -47,7 +47,7 @@ object CameraUtils {
      */
     fun getPresetModes(context: Context): Map<String, List<Int>> {
     val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val cameraId = "0"
+        val cameraId = "3"
         val chars = manager.getCameraCharacteristics(cameraId)
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyMap()
 

@@ -52,6 +52,8 @@ class CameraPreviewActivity : ComponentActivity() {
     private var currentOutputFile: File? = null
     private var isRecording = false
     private var isSurfaceReady = false
+    private var isOpeningCamera = false
+    private var isCameraOpened = false
 
     private val surfaceCallback = object : android.view.SurfaceHolder.Callback {
         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
@@ -241,10 +243,13 @@ class CameraPreviewActivity : ComponentActivity() {
         val id = cameraId ?: return
         if (!hasPermissions()) return
         if (!isSurfaceReady) return
+        if (isOpeningCamera || isCameraOpened || cameraDevice != null) return
 
         try {
+            isOpeningCamera = true
             cameraManager.openCamera(id, cameraStateCallback, backgroundHandler)
         } catch (e: Exception) {
+            isOpeningCamera = false
             runOnUiThread { infoTextView.text = "Errore apertura camera" }
             e.printStackTrace()
         }
@@ -252,16 +257,22 @@ class CameraPreviewActivity : ComponentActivity() {
 
     private val cameraStateCallback = object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
+            isOpeningCamera = false
+            isCameraOpened = true
             cameraDevice = camera
             createPreviewOnlySession()
         }
 
         override fun onDisconnected(camera: CameraDevice) {
+            isOpeningCamera = false
+            isCameraOpened = false
             camera.close()
             cameraDevice = null
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
+            isOpeningCamera = false
+            isCameraOpened = false
             camera.close()
             cameraDevice = null
             runOnUiThread { infoTextView.text = "Errore camera: $error" }
@@ -732,6 +743,9 @@ class CameraPreviewActivity : ComponentActivity() {
 
         cameraDevice?.close()
         cameraDevice = null
+
+        isOpeningCamera = false
+        isCameraOpened = false
     }
 
     @Deprecated("Deprecated in Java")

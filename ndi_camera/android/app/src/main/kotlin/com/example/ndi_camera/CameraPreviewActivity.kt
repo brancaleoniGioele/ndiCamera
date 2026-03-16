@@ -3,7 +3,6 @@ package com.example.ndi_camera
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
@@ -19,7 +18,6 @@ import android.util.Range
 import android.util.Size
 import android.view.Gravity
 import android.view.Surface
-import android.view.TextureView
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -30,6 +28,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class CameraPreviewActivity : ComponentActivity() {
 
@@ -50,10 +50,14 @@ class CameraPreviewActivity : ComponentActivity() {
 
     private var mediaRecorder: MediaRecorder? = null
     private var currentOutputFile: File? = null
+    private var imageReader: android.media.ImageReader? = null
+
+    private var isStreamingNdi = false
     private var isRecording = false
     private var isSurfaceReady = false
     private var isOpeningCamera = false
     private var isCameraOpened = false
+    private var isBackgroundThreadReady = false
 
     private val surfaceCallback = object : android.view.SurfaceHolder.Callback {
         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
@@ -74,6 +78,183 @@ class CameraPreviewActivity : ComponentActivity() {
         override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
             isSurfaceReady = false
         }
+    }
+
+    private fun java.nio.ByteBuffer.toByteArray(): ByteArray {
+        rewind()
+        val data = ByteArray(remaining())
+        get(data)
+        return data
+    }
+
+    private fun createImageReader(size: Size) {
+        imageReader?.close()
+        imageReader = android.media.ImageReader.newInstance(
+            size.width,
+            size.height,
+            android.graphics.ImageFormat.YUV_420_888,
+            3
+        )
+
+        imageReader?.setOnImageAvailableListener({ reader ->
+            if (!isStreamingNdi) {
+                reader.acquireLatestImage()?.close()
+                return@setOnImageAvailableListener
+            }
+
+            val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            try {
+                val planes = image.planes
+                if (planes.size < 3) return@setOnImageAvailableListener
+
+                val yPlane = planes[0].buffer.toByteArray()
+                val uPlane = planes[1].buffer.toByteArray()
+                val vPlane = planes[2].buffer.toByteArray()
+
+                NdiSender.sendFrame(
+                    yPlane = yPlane,
+                    uPlane = uPlane,
+                    vPlane = vPlane,
+                    yRowStride = planes[0].rowStride,
+                    uvRowStride = planes[1].rowStride,
+                    uvPixelStride = planes[1].pixelStride,
+                    width = image.width,
+                    height = image.height,
+                    timestampUs = image.timestamp / 1000L
+                )
+            } catch (e: Exception) {
+                android.util.Log.e("NDI_STREAM", "Errore invio frame NDI", e)
+            } finally {
+                image.close()
+            }
+        }, backgroundHandler)
+    }
+
+    private fun startNdiStreaming() {
+        val camera = cameraDevice ?: return
+        val size = selectedSize ?: return
+        val previewSurface = preparePreviewSurfaceBlocking(size) ?: return
+
+        try {
+            val ndiOk = NdiSender.init("Xiaomi11T NDI")
+            if (!ndiOk) {
+                runOnUiThread {
+                    infoTextView.text = "Errore init NDI"
+                }
+                return
+            }
+
+            createImageReader(size)
+            val imageSurface = imageReader?.surface ?: run {
+                runOnUiThread { infoTextView.text = "ImageReader surface null" }
+                return
+            }
+
+            val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                addTarget(previewSurface)
+                addTarget(imageSurface)
+
+                set(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    if (selectedFps > 30) {
+                        CameraUtils.findHighSpeedRange(this@CameraPreviewActivity, cameraId!!, size, selectedFps)
+                            ?: Range(30, 30)
+                    } else {
+                        Range(30, 30)
+                    }
+                )
+
+                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
+
+            closeCurrentSession()
+
+            if (selectedFps > 30) {
+                camera.createConstrainedHighSpeedCaptureSession(
+                    listOf(previewSurface, imageSurface),
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            val hsSession = session as? CameraConstrainedHighSpeedCaptureSession
+                            if (hsSession == null) {
+                                runOnUiThread { infoTextView.text = "HS session NDI non disponibile" }
+                                return
+                            }
+
+                            captureSession = hsSession
+                            val burstList = hsSession.createHighSpeedRequestList(requestBuilder.build())
+                            hsSession.setRepeatingBurst(burstList, null, backgroundHandler)
+
+                            isStreamingNdi = true
+                            runOnUiThread {
+                                recButton.text = "Ferma NDI"
+                                infoTextView.text =
+                                    "NDI ON ${size.width}x${size.height} @ $selectedFps\nIP: ${NdiSender.getLocalIp()}"
+                            }
+                        }
+
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            runOnUiThread { infoTextView.text = "Config NDI HS fallita" }
+                        }
+                    },
+                    backgroundHandler
+                )
+            } else {
+                camera.createCaptureSession(
+                    listOf(previewSurface, imageSurface),
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            captureSession = session
+                            session.setRepeatingRequest(requestBuilder.build(), null, backgroundHandler)
+
+                            isStreamingNdi = true
+                            runOnUiThread {
+                                recButton.text = "Ferma NDI"
+                                infoTextView.text =
+                                    "NDI ON ${size.width}x${size.height} @ $selectedFps\nIP: ${NdiSender.getLocalIp()}"
+                            }
+                        }
+
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            runOnUiThread { infoTextView.text = "Config NDI fallita" }
+                        }
+                    },
+                    backgroundHandler
+                )
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("NDI_STREAM", "Errore startNdiStreaming", e)
+            runOnUiThread {
+                infoTextView.text = "Errore avvio NDI: ${e.javaClass.simpleName}"
+            }
+        }
+    }
+
+    private fun stopNdiStreaming() {
+        isStreamingNdi = false
+
+        try {
+            closeCurrentSession()
+        } catch (_: Exception) {
+        }
+
+        try {
+            imageReader?.close()
+        } catch (_: Exception) {
+        }
+        imageReader = null
+
+        try {
+            NdiSender.release()
+        } catch (_: Exception) {
+        }
+
+        runOnUiThread {
+            recButton.text = "Avvia NDI"
+            infoTextView.text = "NDI fermato"
+        }
+
+        createPreviewOnlySession()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -120,7 +301,7 @@ class CameraPreviewActivity : ComponentActivity() {
         }
 
         recButton = Button(this).apply {
-            text = "REC 5s"
+            text = "Avvia NDI"
             isEnabled = false
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -131,8 +312,10 @@ class CameraPreviewActivity : ComponentActivity() {
                 marginEnd = 24
             }
             setOnClickListener {
-                if (!isRecording) {
-                    startRecordingTest()
+                if (!isStreamingNdi) {
+                    startNdiStreaming()
+                } else {
+                    stopNdiStreaming()
                 }
             }
         }
@@ -167,10 +350,10 @@ class CameraPreviewActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        stopNdiStreaming()
         stopRecordingIfNeeded()
         closeCamera()
         stopBackgroundThread()
-        super.onPause()
     }
 
     private fun hasPermissions(): Boolean {
@@ -182,13 +365,17 @@ class CameraPreviewActivity : ComponentActivity() {
     }
 
     private fun startBackgroundThread() {
+        if (::backgroundThread.isInitialized && backgroundThread.isAlive) return
         backgroundThread = HandlerThread("Camera2RecordThread").also { it.start() }
         backgroundHandler = Handler(backgroundThread.looper)
+        isBackgroundThreadReady = true
     }
 
     private fun stopBackgroundThread() {
+        if (!::backgroundThread.isInitialized) return
         backgroundThread.quitSafely()
         backgroundThread.join()
+        isBackgroundThreadReady = false
     }
 
     private fun findBackCameraId(): String? {
@@ -243,6 +430,7 @@ class CameraPreviewActivity : ComponentActivity() {
         val id = cameraId ?: return
         if (!hasPermissions()) return
         if (!isSurfaceReady) return
+        if (!isBackgroundThreadReady) return
         if (isOpeningCamera || isCameraOpened || cameraDevice != null) return
 
         try {
@@ -282,11 +470,7 @@ class CameraPreviewActivity : ComponentActivity() {
     private fun createPreviewOnlySession() {
         val camera = cameraDevice ?: return
         val size = selectedSize ?: return
-        val holder = surfaceView.holder
-        holder.setFixedSize(size.width, size.height)
-        val previewSurface = holder.surface ?: return
-
-        updateSurfaceLayout(size)
+        val previewSurface = preparePreviewSurfaceBlocking(size) ?: return
 
         try {
             val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -328,7 +512,7 @@ class CameraPreviewActivity : ComponentActivity() {
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         runOnUiThread {
-                            infoTextView.text = "Config HS REC fallita"
+                            infoTextView.text = "Config preview fallita"
                             recButton.isEnabled = true
                         }
                         stopRecordingIfNeeded()
@@ -340,6 +524,24 @@ class CameraPreviewActivity : ComponentActivity() {
             runOnUiThread { infoTextView.text = "Errore sessione preview" }
             e.printStackTrace()
         }
+    }
+
+    private fun preparePreviewSurfaceBlocking(size: Size): Surface? {
+        val latch = CountDownLatch(1)
+        var surface: Surface? = null
+
+        runOnUiThread {
+            try {
+                updateSurfaceLayout(size)
+                surfaceView.holder.setFixedSize(size.width, size.height)
+                surface = surfaceView.holder.surface
+            } finally {
+                latch.countDown()
+            }
+        }
+
+        latch.await(1, TimeUnit.SECONDS)
+        return surface
     }
 
     private fun updateSurfaceLayout(size: Size) {
@@ -367,11 +569,7 @@ class CameraPreviewActivity : ComponentActivity() {
         val camera = cameraDevice ?: return
         val id = cameraId ?: return
         val size = selectedSize ?: return
-        val holder = surfaceView.holder
-        holder.setFixedSize(size.width, size.height)
-        val previewSurface = holder.surface ?: return
-
-        updateSurfaceLayout(size)
+        val previewSurface = preparePreviewSurfaceBlocking(size) ?: return
 
         val hsRange = CameraUtils.findHighSpeedRange(this, id, size, selectedFps)
         runOnUiThread {

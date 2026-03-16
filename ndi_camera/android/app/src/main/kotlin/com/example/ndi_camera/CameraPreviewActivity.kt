@@ -33,7 +33,7 @@ import java.util.Locale
 
 class CameraPreviewActivity : ComponentActivity() {
 
-    private lateinit var textureView: TextureView
+    private lateinit var surfaceView: android.view.SurfaceView
     private lateinit var infoTextView: TextView
     private lateinit var recButton: Button
 
@@ -51,24 +51,55 @@ class CameraPreviewActivity : ComponentActivity() {
     private var mediaRecorder: MediaRecorder? = null
     private var currentOutputFile: File? = null
     private var isRecording = false
+    private var isSurfaceReady = false
+
+    private val surfaceCallback = object : android.view.SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+            isSurfaceReady = true
+            if (hasPermissions()) {
+                openCamera()
+            }
+        }
+
+        override fun surfaceChanged(
+            holder: android.view.SurfaceHolder,
+            format: Int,
+            width: Int,
+            height: Int
+        ) {
+        }
+
+        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+            isSurfaceReady = false
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         val resolution = intent.getStringExtra("resolution")
         selectedSize = CameraUtils.sizeFromLabel(resolution) ?: Size(1280, 720)
         selectedFps = intent.getIntExtra("fps", 30)
 
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cameraId = findBackCameraId()
+        //cameraId = findBackCameraId()
+        //cameraId = "0" // -> Back camera, 8M (grandangolo)
+        //cameraId = "1" // -> Front camera, 16 MP
+        //cameraId = "2" // -> Back camera, 5M (fotocamera macro)
+        cameraId = "3" // -> Back camera, 108M (fotocamera principale)
 
-        textureView = TextureView(this).apply {
+        //cameraId = CameraUtils.findBestBackCameraId(this, selectedSize, selectedFps)
+        android.util.Log.d("CAM_SELECT", "Camera scelta: $cameraId")
+
+        surfaceView = android.view.SurfaceView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
-            surfaceTextureListener = surfaceListener
         }
+
+        surfaceView.holder.addCallback(surfaceCallback)
 
         infoTextView = TextView(this).apply {
             text = "Pronto"
@@ -79,10 +110,10 @@ class CameraPreviewActivity : ComponentActivity() {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.END
+                Gravity.TOP or Gravity.START
             ).apply {
-                topMargin = 32
-                marginEnd = 32
+                topMargin = 24
+                marginStart = 24
             }
         }
 
@@ -92,9 +123,10 @@ class CameraPreviewActivity : ComponentActivity() {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                Gravity.BOTTOM or Gravity.END
             ).apply {
-                bottomMargin = 48
+                bottomMargin = 24
+                marginEnd = 24
             }
             setOnClickListener {
                 if (!isRecording) {
@@ -104,7 +136,7 @@ class CameraPreviewActivity : ComponentActivity() {
         }
 
         val container = FrameLayout(this).apply {
-            addView(textureView)
+            addView(surfaceView)
             addView(infoTextView)
             addView(recButton)
         }
@@ -126,7 +158,8 @@ class CameraPreviewActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         startBackgroundThread()
-        if (textureView.isAvailable && hasPermissions()) {
+
+        if (hasPermissions() && isSurfaceReady) {
             openCamera()
         }
     }
@@ -185,34 +218,29 @@ class CameraPreviewActivity : ComponentActivity() {
             CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
         ) ?: return false
 
-        val hsSizes = map.highSpeedVideoSizes ?: return false
+        /*val hsSizes = map.highSpeedVideoSizes ?: return false
         if (!hsSizes.contains(size)) {
             return false
-        }
+        }*/
 
         val hsRanges = map.getHighSpeedVideoFpsRangesFor(size) ?: return false
 
+        hsRanges.forEach {
+            android.util.Log.d("HS", "HS range $size -> $it")
+        }
+
         hsRanges.any { range ->
-            range.lower <= fps && range.upper >= fps
+            range.upper >= fps
         }
     } catch (e: Exception) {
         false
     }
 }
 
-    private val surfaceListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-            if (hasPermissions()) openCamera()
-        }
-
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-    }
-
     private fun openCamera() {
         val id = cameraId ?: return
         if (!hasPermissions()) return
+        if (!isSurfaceReady) return
 
         try {
             cameraManager.openCamera(id, cameraStateCallback, backgroundHandler)
@@ -243,10 +271,11 @@ class CameraPreviewActivity : ComponentActivity() {
     private fun createPreviewOnlySession() {
         val camera = cameraDevice ?: return
         val size = selectedSize ?: return
-        val surfaceTexture = textureView.surfaceTexture ?: return
+        val holder = surfaceView.holder
+        holder.setFixedSize(size.width, size.height)
+        val previewSurface = holder.surface ?: return
 
-        surfaceTexture.setDefaultBufferSize(size.width, size.height)
-        val previewSurface = Surface(surfaceTexture)
+        updateSurfaceLayout(size)
 
         try {
             val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -261,6 +290,7 @@ class CameraPreviewActivity : ComponentActivity() {
                 )
             }
 
+            closeCurrentSession()
             camera.createCaptureSession(
                 listOf(previewSurface),
                 object : CameraCaptureSession.StateCallback() {
@@ -301,11 +331,165 @@ class CameraPreviewActivity : ComponentActivity() {
         }
     }
 
+    private fun updateSurfaceLayout(size: Size) {
+        val containerWidth = resources.displayMetrics.widthPixels
+        val containerHeight = resources.displayMetrics.heightPixels
+
+        val previewRatio = size.width.toFloat() / size.height.toFloat()
+        val screenRatio = containerWidth.toFloat() / containerHeight.toFloat()
+
+        val layoutParams = surfaceView.layoutParams as FrameLayout.LayoutParams
+
+        if (previewRatio > screenRatio) {
+            layoutParams.width = containerWidth
+            layoutParams.height = (containerWidth / previewRatio).toInt()
+        } else {
+            layoutParams.height = containerHeight
+            layoutParams.width = (containerHeight * previewRatio).toInt()
+        }
+
+        layoutParams.gravity = Gravity.CENTER
+        surfaceView.layoutParams = layoutParams
+    }
+
+    private fun createHighSpeedPreviewSession() {
+        val camera = cameraDevice ?: return
+        val id = cameraId ?: return
+        val size = selectedSize ?: return
+        val holder = surfaceView.holder
+        holder.setFixedSize(size.width, size.height)
+        val previewSurface = holder.surface ?: return
+
+        updateSurfaceLayout(size)
+
+        val hsRange = CameraUtils.findHighSpeedRange(this, id, size, selectedFps)
+        runOnUiThread {
+            infoTextView.text = "HS range scelto: $hsRange"
+        }
+
+        if (hsRange == null) {
+            runOnUiThread {
+                infoTextView.text = "High-speed range non trovato"
+            }
+            return
+        }
+
+        closeCurrentSession()
+
+        val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            addTarget(previewSurface)
+
+            set(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                hsRange
+            )
+
+            set(
+                CaptureRequest.CONTROL_MODE,
+                CaptureRequest.CONTROL_MODE_AUTO
+            )
+
+            set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            )
+        }
+
+        camera.createConstrainedHighSpeedCaptureSession(
+            listOf(previewSurface),
+            object : CameraCaptureSession.StateCallback() {
+
+                override fun onConfigured(session: CameraCaptureSession) {
+
+                    val hsSession = session as CameraConstrainedHighSpeedCaptureSession
+                    captureSession = hsSession
+
+                    val burst =
+                        hsSession.createHighSpeedRequestList(requestBuilder.build())
+
+                    hsSession.setRepeatingBurst(
+                        burst,
+                        null,
+                        backgroundHandler
+                    )
+
+                    runOnUiThread {
+                        infoTextView.text =
+                            "HS preview ${size.width}x${size.height} @ $selectedFps"
+                        recButton.isEnabled = true
+                    }
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    runOnUiThread {
+                        infoTextView.text = "HS preview configure failed"
+                    }
+                }
+            },
+            backgroundHandler
+        )
+    }
+
+    private fun closeCurrentSession() {
+        try { captureSession?.stopRepeating() } catch (_: Exception) {}
+        try { captureSession?.abortCaptures() } catch (_: Exception) {}
+        try { captureSession?.close() } catch (_: Exception) {}
+        captureSession = null
+    }
+
+    private fun dumpHighSpeedConfigsToUi() {
+        try {
+            val id = cameraId ?: run {
+                runOnUiThread { infoTextView.text = "cameraId null" }
+                return
+            }
+
+            val chars = cameraManager.getCameraCharacteristics(id)
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+
+            if (map == null) {
+                runOnUiThread { infoTextView.text = "StreamConfigurationMap null" }
+                return
+            }
+
+            val hsSizes = map.highSpeedVideoSizes
+            if (hsSizes == null || hsSizes.isEmpty()) {
+                runOnUiThread {
+                    infoTextView.text = "Nessuna HS config per camera $id"
+                }
+                return
+            }
+
+            val sb = StringBuilder()
+            sb.append("Camera $id HS:\n")
+
+            hsSizes.forEach { s ->
+                val ranges = map.getHighSpeedVideoFpsRangesFor(s)
+                sb.append("${s.width}x${s.height} -> ")
+                if (ranges.isNullOrEmpty()) {
+                    sb.append("nessun range\n")
+                } else {
+                    sb.append(ranges.joinToString(", ") { it.toString() })
+                    sb.append("\n")
+                }
+            }
+
+            runOnUiThread {
+                infoTextView.text = sb.toString()
+            }
+        } catch (e: Exception) {
+            runOnUiThread {
+                infoTextView.text = "Errore dump HS: ${e.javaClass.simpleName}\n${e.message}"
+            }
+            e.printStackTrace()
+        }
+    }
+
     private fun startRecordingTest() {
         val camera = cameraDevice ?: return
         val id = cameraId ?: return
         val size = selectedSize ?: return
-        val surfaceTexture = textureView.surfaceTexture ?: return
+        val previewSurface = surfaceView.holder.surface ?: return
 
         val useHighSpeed = selectedFps > 30 && isHighSpeedSupported(id, size, selectedFps)
 
@@ -326,18 +510,17 @@ class CameraPreviewActivity : ComponentActivity() {
             currentOutputFile = buildOutputFile()
             setupMediaRecorder(currentOutputFile!!)
 
-            surfaceTexture.setDefaultBufferSize(size.width, size.height)
-            val previewSurface = Surface(surfaceTexture)
             val recordSurface = mediaRecorder!!.surface
 
             val template = if (useHighSpeed) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_RECORD
 
+            val hsRange = CameraUtils.findHighSpeedRange(this, id, size, selectedFps)
             val requestBuilder = camera.createCaptureRequest(template).apply {
                 addTarget(previewSurface)
                 addTarget(recordSurface)
                 set(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    Range(selectedFps, selectedFps)
+                    hsRange ?: Range(selectedFps, selectedFps)
                 )
                 set(
                     CaptureRequest.CONTROL_AF_MODE,
@@ -346,6 +529,7 @@ class CameraPreviewActivity : ComponentActivity() {
             }
 
             if (useHighSpeed) {
+                closeCurrentSession()
                 camera.createConstrainedHighSpeedCaptureSession(
                     listOf(previewSurface, recordSurface),
                     object : CameraCaptureSession.StateCallback() {
@@ -377,7 +561,7 @@ class CameraPreviewActivity : ComponentActivity() {
                                     recButton.isEnabled = false
                                 }
 
-                                textureView.postDelayed({
+                                surfaceView.postDelayed({
                                     stopRecordingIfNeeded()
                                 }, 5000)
                             } catch (e: Exception) {
@@ -398,6 +582,7 @@ class CameraPreviewActivity : ComponentActivity() {
                     backgroundHandler
                 )
             } else {
+                closeCurrentSession()
                 camera.createCaptureSession(
                     listOf(previewSurface, recordSurface),
                     object : CameraCaptureSession.StateCallback() {
@@ -419,7 +604,7 @@ class CameraPreviewActivity : ComponentActivity() {
                                     recButton.isEnabled = false
                                 }
 
-                                textureView.postDelayed({
+                                surfaceView.postDelayed({
                                     stopRecordingIfNeeded()
                                 }, 5000)
                             } catch (e: Exception) {
@@ -462,16 +647,16 @@ class CameraPreviewActivity : ComponentActivity() {
         }
 
         mediaRecorder?.apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
+            //setAudioSource(MediaRecorder.AudioSource.MIC)
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
 
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            //setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
 
             setVideoEncodingBitRate(bitRate)
-            setAudioEncodingBitRate(128_000)
-            setAudioSamplingRate(48_000)
+            //setAudioEncodingBitRate(128_000)
+            //setAudioSamplingRate(48_000)
 
             setVideoFrameRate(fps)
             setVideoSize(size.width, size.height)
@@ -561,7 +746,7 @@ class CameraPreviewActivity : ComponentActivity() {
             grantResults.isNotEmpty() &&
             grantResults.all { it == PackageManager.PERMISSION_GRANTED }
         ) {
-            if (textureView.isAvailable) openCamera()
+            openCamera()
         } else {
             finish()
         }

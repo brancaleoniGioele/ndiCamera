@@ -2,7 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
   runApp(const MyApp());
 }
 
@@ -103,66 +108,131 @@ class _CameraHomePageState extends State<CameraHomePage> {
       appBar: AppBar(
         title: const Text('NDI Camera'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(_status),
-            const SizedBox(height: 16),
-            if (_permissionsGranted)
-              FilledButton(
-                onPressed: _getPresetModes,
-                child: const Text('Leggi modalità compatibili'),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 3,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _status,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 16),
+                    if (_permissionsGranted)
+                      FilledButton(
+                        onPressed: _getPresetModes,
+                        child: const Text('Leggi modalità compatibili'),
+                      ),
+                    const SizedBox(height: 16),
+                    const Spacer(),
+                    const Text(
+                      'Configura risoluzione e fps dal pannello a destra',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ],
+                ),
               ),
-            const SizedBox(height: 20),
-            if (presetModes.isNotEmpty) ...[
-              const Text('Risoluzione'),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                children: presetModes.keys.map((resolution) {
-                  return ChoiceChip(
-                    label: Text(resolution),
-                    selected: selectedResolution == resolution,
-                    onSelected: (_) {
-                      final newFpsOptions = presetModes[resolution] ?? [];
-                      setState(() {
-                        selectedResolution = resolution;
-                        selectedFps = newFpsOptions.contains(selectedFps)
-                            ? selectedFps
-                            : (newFpsOptions.isNotEmpty ? newFpsOptions.first : null);
-                      });
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 20),
-              const Text('FPS'),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                children: fpsOptions.map((fps) {
-                  return ChoiceChip(
-                    label: Text('$fps fps'),
-                    selected: selectedFps == fps,
-                    onSelected: (_) {
-                      setState(() {
-                        selectedFps = fps;
-                      });
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: (selectedResolution != null && selectedFps != null)
-                    ? _startPreview
-                    : null,
-                child: const Text('Avvia preview'),
+              const SizedBox(width: 20),
+              SizedBox(
+                width: 320,
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'Controlli',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          DropdownButtonFormField<String>(
+                            value: selectedResolution,
+                            decoration: const InputDecoration(
+                              labelText: 'Risoluzione',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: presetModes.keys
+                                .map(
+                                  (resolution) => DropdownMenuItem<String>(
+                                    value: resolution,
+                                    child: Text(resolution),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: presetModes.isEmpty
+                                ? null
+                                : (value) {
+                                    if (value == null) return;
+                                    final newFpsOptions = presetModes[value] ?? [];
+                                    setState(() {
+                                      selectedResolution = value;
+                                      selectedFps = newFpsOptions.contains(selectedFps)
+                                          ? selectedFps
+                                          : (newFpsOptions.isNotEmpty
+                                              ? newFpsOptions.first
+                                              : null);
+                                    });
+                                  },
+                          ),
+                          const SizedBox(height: 16),
+                          DropdownButtonFormField<int>(
+                            value: fpsOptions.contains(selectedFps) ? selectedFps : null,
+                            decoration: const InputDecoration(
+                              labelText: 'FPS',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: fpsOptions
+                                .map(
+                                  (fps) => DropdownMenuItem<int>(
+                                    value: fps,
+                                    child: Text('$fps fps'),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: fpsOptions.isEmpty
+                                ? null
+                                : (value) {
+                                    setState(() {
+                                      selectedFps = value;
+                                    });
+                                  },
+                          ),
+                          const SizedBox(height: 20),
+                          FilledButton(
+                            onPressed: (selectedResolution != null && selectedFps != null)
+                                ? _startPreview
+                                : null,
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 14),
+                              child: Text('Avvia preview'),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          if (presetModes.isNotEmpty)
+                            Text(
+                              'Modalità disponibili: '
+                              '${presetModes.entries.map((e) => "${e.key} → ${e.value.join(", ")} fps").join("   |   ")}',
+                              style: const TextStyle(fontSize: 12, color: Colors.grey),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ],
-          ],
+          ),
         ),
       ),
     );
